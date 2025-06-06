@@ -2,6 +2,8 @@
 
 Sprout is a lightweight HTTP relay that runs on a Raspberry Pi Pico W or ESP32. It syncs OpenHerd messages, stores them offline, advertises itself over mDNS, and can optionally register with a global beacon for discovery. It is a work-in-progress implementation of the full relay spec.
 
+Note: Due to memory constraints on the Pico, it may struggle at times. We're working on fixing it.
+
 ## Quick Start
 
 1. Flash your board with [This fork of MicroPython](https://github.com/cbrand/micropython-mdns/releases) (select the uf2 file, `firmware.mp.<version>.rp2.uf2`)

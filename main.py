@@ -4,7 +4,6 @@ except ImportError:
     import mip
     mip.install("github:cbrand/micropython-mdns")
 import network
-import socket
 import ujson
 import os
 import time
@@ -14,6 +13,7 @@ import random
 import uasyncio
 from mdns_client import Client
 from mdns_client.responder import Responder
+import os
 
 # Operational Config
 WIFI_SSID = "SSID"
@@ -32,6 +32,8 @@ LNG ="-84.3885"
 NICKNAME = "My Club's Openherd Relay"
 OPERATOR = "My Club"
 
+PORT = 49152
+
 if POSTS_DIR[1:] not in os.listdir('/'):
     os.mkdir(POSTS_DIR)
 
@@ -46,25 +48,17 @@ def connect_wifi(ssid, password):
     print("\nConnected:", wlan.ifconfig())
     return wlan.ifconfig()[0]
 
-def find_free_port(start_port=49152, end_port=65535, max_attempts=100):
-    for _ in range(max_attempts):
-        port = random.randint(start_port, end_port)
-        try:
-            s = socket.socket()
-            s.bind(('', port))
-            s.close()
-            return port
-        except OSError:
-            continue
-    raise RuntimeError("Could not find free port")
-
-def read_posts():
+def read_posts(limit=None, offset=0):
     posts = []
     try:
-        for fname in os.listdir(POSTS_DIR):
+        all_files = os.listdir(POSTS_DIR)
+        files_to_process = all_files[offset:None if limit is None else offset+limit]
+        for fname in files_to_process:
             try:
                 with open(POSTS_DIR + "/" + fname) as f:
                     posts.append(ujson.load(f))
+                import gc
+                gc.collect()
             except:
                 pass
     except:
@@ -131,33 +125,90 @@ async def handle_client_async(reader, writer):
         body = await reader.read(content_length) if content_length else b""
 
         if method == "GET" and path == "/_openherd/outbox":
-            posts = read_posts()
-            response_json = ujson.dumps(posts)
-            response_bytes = response_json.encode('utf-8')
-            await writer.awrite(f"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(response_bytes)}\r\n\r\n")
-            await writer.awrite(response_bytes)
+            limit = 10
+            offset = 0
+            
+            if "?" in path:
+                path, query = path.split("?", 1)
+                params = query.split("&")
+                for param in params:
+                    if "=" in param:
+                        key, value = param.split("=")
+                        if key == "limit":
+                            limit = int(value)
+                        elif key == "offset":
+                            offset = int(value)
+            
+            posts = read_posts(limit=limit, offset=offset)
+            await writer.awrite(f"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n")
+            await writer.awrite("[")
+            
+            for i, post in enumerate(posts):
+                if i > 0:
+                    await writer.awrite(",")
+                post_json = ujson.dumps(post)
+                await writer.awrite(post_json)
+                await uasyncio.sleep_ms(10)
+            await writer.awrite("]")
+            import gc
+            gc.collect()
 
         elif method == "POST" and path == "/_openherd/inbox":
             try:
-                posts = ujson.loads(body)
+                if len(body) != content_length:
+                    response_json = ujson.dumps({"error": "Body length mismatch"})
+                    response_bytes = response_json.encode('utf-8')
+                    await writer.awrite(
+                        f"HTTP/1.0 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {len(response_bytes)}\r\n\r\n"
+                    )
+                    await writer.awrite(response_bytes)
+                    import gc
+                    gc.collect()
+                    return
+
+                import gc
+                gc.collect()
+
+                body_str = body.decode('utf-8')
+                posts = ujson.loads(body_str)
+
                 if not isinstance(posts, list):
-                    raise ValueError("Expected list")
+                    raise ValueError("Expected JSON array")
+
                 for post in posts:
-                    save_post(post)
-                response_json = ujson.dumps({"ok":True})
-                response_bytes = response_json.encode('utf-8')
-                await writer.awrite(f"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(response_bytes)}\r\n\r\n")
-                await writer.awrite(response_bytes)
+                    try:
+                        import gc
+                        gc.collect()
+                        save_post(post)
+                    except Exception as e:
+                        print(f"Error processing item: {e}")
+
+                response_json = ujson.dumps({"ok": True})
+
+            except ValueError as ve:
+                import gc
+                gc.collect()
+                print(f"JSON parsing error: {ve}")
+                response_json = ujson.dumps({"error": "Invalid JSON format"})
+
             except Exception as e:
-                error_message_bytes = str(e).encode('utf-8')
-                await writer.awrite(f"HTTP/1.0 400 Bad Request\r\nContent-Length: {len(error_message_bytes)}\r\n\r\n")
-                await writer.awrite(error_message_bytes)
+                print(f"General error: {e}")
+                response_json = ujson.dumps({"error": str(e)})
+
+            response_bytes = response_json.encode('utf-8')
+            content_length = len(response_bytes)
+            await writer.awrite(
+                f"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: {content_length}\r\n\r\n"
+            )
+            await writer.awrite(response_bytes)
         else:
-            not_found_message = b"404 Not Found"
-            await writer.awrite(f"HTTP/1.0 404 Not Found\r\nContent-Length: {len(not_found_message)}\r\n\r\n")
+            not_found_message = f"   ____                   _                  _ \n  / __ \\                 | |                | |\n | |  | |_ __   ___ _ __ | |__   ___ _ __ __| |\n | |  | | '_ \\ / _ \\ '_ \\| '_ \\ / _ \\ '__/ _` |\n | |__| | |_) |  __/ | | | | | |  __/ | | (_| |\n  \\____/| .__/ \\___|_| |_|_| |_|\\___|_|  \\__,_|\n        | |                                    \n        |_|\n\nOpenHerd is a way for people to chat and share short, temporary messages without anyone really knowing who they are.\nThink of it as a digital bulletin board for a local area, but super private.\nIt's built using Free and Open Source Software (FOSS), meaning it's created by a community and anyone can see how it works.\nIt's also peer-to-peer, which means messages go directly between people's devices rather than through a central company.\n\nLearn more at https://github.com/openherd\n\nDevice: {os.uname().machine}\nNickname: {NICKNAME}\nOperator: {OPERATOR}"
+            await writer.awrite(f"HTTP/1.0 200 OK\r\nContent-Length: {len(not_found_message)}\r\nContent-Type: text/plain\r\n\r\n")
             await writer.awrite(not_found_message)
     finally:
         await writer.aclose()
+        import gc
+        gc.collect()
 
 async def start_http_server(port):
     server = await uasyncio.start_server(handle_client_async, "0.0.0.0", port)
@@ -166,19 +217,39 @@ async def start_http_server(port):
 
 # Syncing (As defined in section 6)
 async def sync_loop():
+    BATCH_SIZE = 1
+    
     while True:
-        posts = read_posts()
         for peer in BOOTSTRAPPING_PEERS:
             try:
                 print(f"Syncing with {peer}/_openherd/inbox")
-                urequests.post(peer + "/_openherd/inbox", json=posts)
+                
+                all_posts = os.listdir(POSTS_DIR)
+                for i in range(0, len(all_posts), BATCH_SIZE):
+                    batch = []
+                    for j in range(i, min(i + BATCH_SIZE, len(all_posts))):
+                        try:
+                            with open(POSTS_DIR + "/" + all_posts[j]) as f:
+                                batch.append(ujson.load(f))
+                        except:
+                            pass
+                    
+                    if batch:
+                        urequests.post(peer + "/_openherd/inbox", json=batch)
+                        await uasyncio.sleep(1)
+                
                 print(f"Fetching from {peer}/_openherd/outbox")
                 res = urequests.get(peer + "/_openherd/outbox")
-                for post in res.json():
-                    save_post(post)
+                posts = res.json()
+                for i in range(0, len(posts), BATCH_SIZE):
+                    for j in range(i, min(i + BATCH_SIZE, len(posts))):
+                        save_post(posts[j])
+                    await uasyncio.sleep(1)
+
                 print(f"Sync with {peer} successful.")
             except Exception as e:
                 print(f"Sync failed with {peer}:", e)
+                
         await uasyncio.sleep(300)
 
 # mDNS advertisement (cbrand/micropython-mdns)
@@ -187,7 +258,7 @@ async def start_mdns(ip, port):
     responder = Responder(client, own_ip=lambda: ip, host=lambda: f"openherd-{random.randint(1000,9999)}")
     responder.advertise(
         "_openherd", "_tcp", port=port,
-        data={"device": "picow"},
+        data={"device": os.uname().machine},
         service_host_name=f"openherd relay ({random.randint(1000,9999)})"
     )
     print("mDNS advertisement started")
@@ -195,7 +266,7 @@ async def start_mdns(ip, port):
 # Main Function
 async def main():
     ip = connect_wifi(WIFI_SSID, WIFI_PASS)
-    port = find_free_port()
+    port = PORT
     register(ip, WIFI_SSID)
 
     await start_mdns(ip, port)
