@@ -19,7 +19,7 @@ import os
 WIFI_SSID = "SSID"
 WIFI_PASS = "1234567890"
 
-BEACON_URL = "https://beacon.openherd.dispherical.com"
+BEACON_URL = "https://beacon.openherd.network"
 BOOTSTRAPPING_PEERS = ["https://openherd.dispherical.com"]
 PASSWORD = "SuperSecretRelayPW123!"
 PUBLIC_KEY = "Me6vHCwTRja0fOGBQ6KQGoGCtUXeJ4dEKqUD1AfIoH4="
